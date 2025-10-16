@@ -45,7 +45,7 @@ catalogue = {
 
 def rqds(prompt, content, temperature):
     client = OpenAI(
-        api_key = "sk-83669bdbb51f40b49a18e3f8fb5231d8",
+        api_key = os.environ.get('DEEPSEEK_API_KEY'),,
         base_url = "https://api.deepseek.com/v1")
     
     response = client.chat.completions.create(
@@ -60,13 +60,13 @@ def rqds(prompt, content, temperature):
   
 def gtembd(text):
     client = OpenAI(
-        api_key="sk-846085efd2134c25afca40c2c55f7618",  
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        api_key = os.environ.get('DASHSCOPE_API_KEY'),,  
+        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
     completion = client.embeddings.create(
         model = "text-embedding-v4",
         input = text,
-        dimensions=1024)
+        dimensions = 1024)
     return completion.data[0].embedding
 
 class NewsCrawler:

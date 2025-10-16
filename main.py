@@ -45,7 +45,7 @@ catalogue = {
 
 def rqds(prompt, content, temperature):
     client = OpenAI(
-        api_key = "sk-83669bdbb51f40b49a18e3f8fb5231d8",
+        api_key = os.environ.get('DEEPSEEK_API_KEY'),,
         base_url = "https://api.deepseek.com/v1")
     
     response = client.chat.completions.create(
