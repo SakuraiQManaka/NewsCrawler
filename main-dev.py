@@ -20,6 +20,7 @@ import os
 import numpy as np
 from sklearn.cluster import DBSCAN
 import pickle
+import newscrawler as nc
 
 # 配置（请替换为你的API密钥）
 API_KEY = "sk-83669bdbb51f40b49a18e3f8fb5231d8"
@@ -29,6 +30,7 @@ BASE_URL = "https://api.deepseek.com"
 #默认新闻网站列表
 sites = [
     "xinhua",
+    "people"
     ]
 
 catalogue = {
@@ -37,7 +39,7 @@ catalogue = {
         "fortune" : "https://www.xinhuanet.com/fortune/yx/",
         "world": "https://www.xinhuanet.com/worldpro/gjxw/",
         },
-    "people_daily": {
+    "people": {
         "layout": lambda month, day: f"https://paper.people.com.cn/rmrb/pc/layout/{month}/{day}/node_01.html",
         "content": lambda month, day, page: f"https://paper.people.com.cn/rmrb/pc/content/{month}/{day}/content_{page}.html",
         },
@@ -45,7 +47,7 @@ catalogue = {
 
 def rqds(prompt, content, temperature):
     client = OpenAI(
-        api_key = os.environ.get('DEEPSEEK_API_KEY'),,
+        api_key = os.environ.get('DEEPSEEK_API_KEY'),
         base_url = "https://api.deepseek.com/v1")
     
     response = client.chat.completions.create(
@@ -60,7 +62,7 @@ def rqds(prompt, content, temperature):
   
 def gtembd(text):
     client = OpenAI(
-        api_key = os.environ.get('DASHSCOPE_API_KEY'),,  
+        api_key = os.environ.get('DASHSCOPE_API_KEY'),
         base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
     completion = client.embeddings.create(
@@ -68,111 +70,6 @@ def gtembd(text):
         input = text,
         dimensions = 1024)
     return completion.data[0].embedding
-
-class NewsCrawler:
-    """新闻爬虫基类"""
-    
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
-        })
-    
-    def generateurl(self, catalogue):
-        """生成urls - 需要子类实现"""
-        raise NotImplementedError
-    
-    def crawl_news(self, url):
-        """爬取新闻文章 - 需要子类实现"""
-        raise NotImplementedError
-
-class XinhuaCrawler(NewsCrawler):
-    """新华网爬虫"""
-    
-    def generateurl(self, catalogue):
-        urls = []
-        try:
-            for key,value in catalogue.items():
-                _ord = 0
-                response = self.session.get(value, timeout=10)
-                soup = BeautifulSoup(response.content, "html.parser")
-                content_list = soup.find('div', id='content-list')
-                if content_list:
-                    tit_divs = content_list.find_all('div', class_='tit')
-                    for tit_div in tit_divs:
-                        a_tag = tit_div.find('a')
-                        if a_tag and a_tag.has_attr('href'):
-                            href = a_tag['href']
-                            url = "https://www.xinhuanet.com"+href if "www" not in href else href
-                            urls.append(url)
-                            _ord += 1
-                print(f"成功生成新华网 {key} 新闻列表，共{_ord}个新闻")      
-            print(f"新华网全部新闻url生成完毕，总计 {len(urls)} 条")
-            return urls
-        except Exception as e:
-            print(f"生成新华网新闻地址失败：{e}")
-            return None
-    
-    def crawl_news(self, url):
-        try:
-            response = self.session.get(url, timeout=10)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # 新华网特定的解析逻辑
-            title = soup.find("span", class_="title").get_text().strip() if soup.find("span", class_="title") else ''
-            
-            # 获取发布时间
-            time_element = soup.find("div", class_="header-time")
-            publish_time = "/".join(i.get_text() for i in time_element.find_all("em")) if time_element else ''
-            
-            # 获取正文内容
-            content = soup.find("span", id="detailContent").get_text()
-            cleaned_text = content.replace('\xa0', ' ').replace('\u3000', ' ').replace('\u2002', ' ').replace('\u2003', ' ')
-            
-            return {
-                'title': title,
-                'content': cleaned_text,
-                'publish_time': publish_time,
-                'source': 'xinhua',
-                'url': url
-            }
-        except Exception as e:
-            print(f"爬取新华网新闻失败: {e}")
-            return None
-
-class PeopleDailyCrawler(NewsCrawler):
-    """
-    人民日报爬虫 
-    待完善……
-    """
-    
-    def crawl_news(self, url):
-        try:
-            response = self.session.get(url, timeout=10)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # 人民日报特定的解析逻辑
-            title = soup.find('h1').get_text().strip() if soup.find('h1') else ''
-            
-            time_element = soup.find('div', class_=re.compile(r'time'))
-            publish_time = time_element.get_text().strip() if time_element else ''
-            
-            author_element = soup.find('span', class_=re.compile(r'author'))
-            author = author_element.get_text().strip() if author_element else ''
-            
-            content_elements = soup.select('div.content p, div.text p')
-            content = '\n'.join([p.get_text().strip() for p in content_elements])
-            
-            return {
-                'title': title,
-                'content': content,
-                'publish_time': publish_time,
-                'source': '人民日报',
-                'url': url
-            }
-        except Exception as e:
-            print(f"爬取人民日报新闻失败: {e}")
-            return None
 
 class NewsProcessor:
     """新闻处理器"""
@@ -266,81 +163,6 @@ class NewsProcessor:
             fallback_summary = f"该事件被{len(articles)}个来源报道，主要内容涉及{articles[0]['title']}"
             return fallback_sentence, fallback_summary
 
-class EventTracker:
-    """事件追踪器"""
-    
-    def __init__(self):
-        self.events = defaultdict(list)
-        self.event_summaries = {}
-    
-    def calculate_similarity(self, keywords1, keywords2):
-        """计算两个关键词列表的相似度"""
-        set1 = set(keywords1)
-        set2 = set(keywords2)
-        
-        if not set1 or not set2:
-            return 0
-        
-        intersection = len(set1.intersection(set2))
-        union = len(set1.union(set2))
-        
-        return intersection / union if union > 0 else 0
-    
-    def find_similar_event(self, article_keywords, threshold=0.3):
-        """寻找相似的事件"""
-        for event_id, articles in self.events.items():
-            # 计算与事件中所有文章的平均相似度
-            total_similarity = 0
-            for existing_article in articles:
-                similarity = self.calculate_similarity(
-                    article_keywords, existing_article['keywords']
-                )
-                total_similarity += similarity
-            
-            avg_similarity = total_similarity / len(articles) if articles else 0
-            
-            if avg_similarity >= threshold:
-                return event_id
-        
-        return None
-    
-    def generate_event_id(self, keywords):
-        """根据关键词生成事件ID"""
-        key_string = ''.join(sorted(keywords))
-        return hashlib.md5(key_string.encode()).hexdigest()[:8]
-    
-    def add_article(self, article):
-        """添加文章到相应事件"""
-        if not article.get('keywords'):
-            return None
-        
-        # 寻找相似事件
-        similar_event_id = self.find_similar_event(article['keywords'])
-        
-        if similar_event_id:
-            event_id = similar_event_id
-        else:
-            # 创建新事件
-            event_id = self.generate_event_id(article['keywords'])
-        
-        self.events[event_id].append(article)
-        return event_id
-    
-    def calculate_event_weights(self):
-        """计算事件权重（基于报道数量）"""
-        weights = {}
-        for event_id, articles in self.events.items():
-            # 基础权重：报道数量
-            base_weight = len(articles)
-            
-            # 考虑来源多样性
-            sources = set(article['source'] for article in articles)
-            diversity_bonus = len(sources) * 0.5
-            
-            weights[event_id] = base_weight + diversity_bonus
-        
-        return weights
-
 class NewsDatabase:
     """新闻数据库"""
     
@@ -385,6 +207,11 @@ class NewsDatabase:
         conn.commit()
         conn.close()
     
+    def gettodayurl(self):
+        todayurls = []
+        '''待完善'''
+        return todayurls
+
     def save_article(self, article):
         """保存文章到数据库"""
         conn = sqlite3.connect(self.db_path)
@@ -427,14 +254,20 @@ class NewsDatabase:
         if embedding is not None:
             embedding_blob = pickle.dumps(embedding)
         
-        cursor.execute('''
-            INSERT OR REPLACE INTO events 
-            (event_id, one_sentence, summary, weight, article_count, embedding)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (event_id, one_sentence, summary, weight, article_count, embedding_blob))
-        
-        conn.commit()
-        conn.close()
+        try:
+            cursor.execute(''' 
+                INSERT OR REPLACE INTO events 
+                (event_id, one_sentence, summary, weight, article_count, embedding)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (event_id, one_sentence, summary, weight, article_count, embedding_blob))
+
+            conn.commit()
+            print(f"事件 {event_id} 成功保存到数据库")  # 调试信息
+        except Exception as e:
+            print(f"保存事件失败: {e}")
+        finally:
+            conn.close()
+
     
     def get_all_articles_basic(self):
         """获取所有文章的基本信息"""
@@ -520,6 +353,7 @@ class VectorEventTracker:
     def __init__(self, similarity_threshold=0.7):
         self.similarity_threshold = similarity_threshold
         self.events = {}  # event_id -> {articles, centroid}
+        self.event_summaries = {}  # 添加这个属性来存储事件总结
     
     def cosine_similarity(self, vec1, vec2):
         """计算两个向量的余弦相似度"""
@@ -565,8 +399,9 @@ class VectorEventTracker:
     def add_article(self, article):
         """添加文章到相应事件（基于向量）"""
         if 'embedding' not in article or article['embedding'] is None:
+            print(f"文章 {article['title']} 没有嵌入向量，跳过")  # 调试信息
             return None
-        
+
         # 寻找相似事件
         event_id = self.find_similar_event_by_vector(article['embedding'])
         
@@ -576,6 +411,7 @@ class VectorEventTracker:
             # 更新质心
             embeddings = [a['embedding'] for a in self.events[event_id]['articles']]
             self.events[event_id]['centroid'] = self.calculate_event_centroid(embeddings)
+            print(f"文章 {article['title']} 被添加到事件 {event_id}")  # 调试信息
         else:
             # 创建新事件
             event_id = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
@@ -583,8 +419,10 @@ class VectorEventTracker:
                 'articles': [article],
                 'centroid': article['embedding']
             }
+            print(f"文章 {article['title']} 创建了新事件 {event_id}")  # 调试信息
         
         return event_id
+
     
     def cluster_articles(self, articles_with_embeddings, eps=0.5, min_samples=2):
         """使用DBSCAN对文章进行聚类"""
@@ -621,24 +459,47 @@ class VectorEventTracker:
         
         return self.events
 
+    def calculate_event_weights(self):
+        """计算事件权重（基于报道数量）"""
+        weights = {}
+        for event_id, event_data in self.events.items():
+            articles = event_data['articles']
+            
+            # 确保articles是字典列表
+            if articles and isinstance(articles[0], dict):
+                # 基础权重：报道数量
+                base_weight = len(articles)
+                
+                # 考虑来源多样性
+                sources = set(article['source'] for article in articles if isinstance(article, dict) and 'source' in article)
+                diversity_bonus = len(sources) * 0.5
+                
+                weights[event_id] = base_weight + diversity_bonus
+            else:
+                # 如果articles不是字典列表，使用默认权重
+                weights[event_id] = len(articles) if articles else 0
+                print(f"警告：事件 {event_id} 的文章格式异常")
+        
+        return weights
+
 class NewsAITool:
     """新闻AI工具主类"""
     
-    def __init__(self):
-        self.crawlers = {
-            'xinhua': XinhuaCrawler(),
-            'people_daily': PeopleDailyCrawler()
-        }
+    def __init__(self, sites, catalogue):
         self.catalogue = catalogue
         self.processor = NewsProcessor()
-        self.event_tracker = EventTracker()
         self.vector_event_tracker = VectorEventTracker()
         self.database = NewsDatabase()
-        
+        self.todayurl = self.database.gettodayurl()    
         self.sites = sites
+        self.crawlers = {
+            'xinhua': nc.XinhuaCrawler() if 'xinhua' in self.sites else '',
+            'people': nc.PeopleDailyCrawler() if 'people' in self.sites else '',
+        }
+    
         self.sitetrans = {
             'xinhua':'新华网',
-            'people_daily': '人民日报',
+            'people': '人民日报',
             }
     
     def get_all_articles_basic(self):
@@ -657,56 +518,80 @@ class NewsAITool:
         """使用向量对文章进行聚类"""
         # 获取所有带有嵌入向量的文章
         articles_with_embeddings = self.database.get_articles_with_embeddings()
-        
+
         # 使用向量事件追踪器进行聚类
         events = self.vector_event_tracker.cluster_articles(articles_with_embeddings, eps, min_samples)
-        
+
+        # 调试：确认有多少事件被生成
+        print(f"聚类后生成的事件数: {len(events)}")  # 调试信息
+
         # 为每个事件生成总结并保存到数据库
         for event_id, event_data in events.items():
             one_sentence, summary = self.processor.generate_summary(event_data['articles'])
-            
+
+            # 调试：检查生成的事件数据
+            print(f"生成的事件 {event_id}：一句话新闻: {one_sentence}, 详细总结: {summary}")
+
             # 保存事件到数据库
             self.database.save_event(
                 event_id, one_sentence, summary, 
                 len(event_data['articles']), len(event_data['articles']),
                 event_data['centroid']
             )
-            
+
             # 更新文章中事件ID
             for article in event_data['articles']:
                 article['event_id'] = event_id
                 self.database.save_article(article)
-        
+
         return events
     
     def crawl_all_news(self):
         """爬取所有新闻源的文章"""
+
         all_articles = []
-        
+
         for site in self.sites:
+            _ord = 0
             crawler = self.crawlers[site]
             if not crawler: 
                 continue
+
             print(f"正在爬取 {self.sitetrans[site]} 新闻")
-            print("\n")
-            urls = crawler.generateurl(self.catalogue[site])
-            #使用上边的先生成一个url列表，再用下边的依次爬取
+            urls = crawler.generateurl()
+            '''
+            urls = [
+                'http://www.news.cn/world/20251020/27e6e9a077d0489c8fd1ace6ef15b23b/c.html',
+                'http://www.news.cn/politics/20251020/4893586fb647414d8769f2fdb73352e8/c.html',
+            ]
+            '''
+            todayurls = self.database.gettodayurl()
+            urls = set(urls) - set(todayurls)
+            _tot = len(urls)
             if not urls:
                 continue
-            #应该再加入一个检查url是否重复的功能
+
             for url in urls:
-                print(f"爬取: {url}")
+                _ord += 1
+                print(f"正在爬取第{_ord}/{_tot} 条")
                 article = crawler.crawl_news(url)
                 if article:
                     # 提取关键词
                     article['keywords'] = self.processor.extract_keywords(
                         f"{article['title']} {article['content']}"
                     )
-                    all_articles.append(article)
-                    
-                    # 添加到事件追踪
-                    event_id = self.event_tracker.add_article(article)
+
+                    # 生成文章的嵌入向量
+                    embedding = gtembd(article['title'] + article['content'])  # Adjust embedding generation logic if needed
+                    article['embedding'] = embedding
+
+                    print(f"文章 {article['title']} 的嵌入向量：{embedding[:10]}...")  # 只显示前10个数字
+
+                    # 使用向量追踪事件
+                    event_id = self.vector_event_tracker.add_article(article)
                     article['event_id'] = event_id
+
+                    all_articles.append(article)
                     
                     # 保存到数据库
                     self.database.save_article(article)
@@ -715,39 +600,55 @@ class NewsAITool:
         
         return all_articles
     
+    
     def process_events(self):
         """处理所有事件并生成总结"""
         # 计算事件权重
-        weights = self.event_tracker.calculate_event_weights()
-        
+        weights = self.vector_event_tracker.calculate_event_weights()
+        print(f"事件权重: {weights}")  # 调试信息
+
         # 为每个事件生成总结
-        for event_id, articles in self.event_tracker.events.items():
+        for event_id, event_data in self.vector_event_tracker.events.items():
+            articles = event_data['articles']
             one_sentence, summary = self.processor.generate_summary(articles)
             
-            self.event_tracker.event_summaries[event_id] = {
+            # 确保生成了总结
+            if one_sentence and summary:
+                print(f"事件 {event_id} 总结生成成功：{one_sentence}, {summary}")
+            else:
+                print(f"事件 {event_id} 总结生成失败")
+
+            self.vector_event_tracker.event_summaries[event_id] = {
                 'one_sentence': one_sentence,
                 'summary': summary,
-                'weight': weights[event_id],
+                'weight': weights.get(event_id, 0),
                 'article_count': len(articles)
             }
-            
+
             # 保存到数据库
             self.database.save_event(
                 event_id, one_sentence, summary, 
-                weights[event_id], len(articles)
+                weights.get(event_id, 0), len(articles)
             )
+
     
     def get_important_events(self, top_n=5):
         """获取最重要的事件"""
         events_with_weights = [
             (event_id, info['weight'], info) 
-            for event_id, info in self.event_tracker.event_summaries.items()
+            for event_id, info in self.vector_event_tracker.event_summaries.items()
         ]
-        
+        print(f"事件总数: {len(events_with_weights)}")
+
         # 按权重排序
         sorted_events = sorted(events_with_weights, key=lambda x: x[1], reverse=True)
         
+        # 输出调试信息
+        for event_id, weight, info in sorted_events:
+            print(f"事件 {event_id} 权重: {weight:.2f}")
+
         return sorted_events[:top_n]
+
     
     def run(self):
         """运行完整的新闻处理流程"""
@@ -755,6 +656,7 @@ class NewsAITool:
         articles = self.crawl_all_news()
         print(f"成功爬取 {len(articles)} 篇文章")
         
+
         print("处理事件和生成总结...")
         self.process_events()
         
@@ -774,35 +676,10 @@ class NewsAITool:
 # 使用示例
 if __name__ == "__main__":
     # 初始化工具（请替换为你的API密钥）
-    ai_tool = NewsAITool()
+    ai_tool = NewsAITool(sites, catalogue)
     
+    ai_tool.database.clear_database()
+
     # 运行完整流程
-    # ai_tool.run()
+    ai_tool.run()
     
-    # 新功能使用示例：
-    
-    # 1. 获取所有文章基本信息
-    print("=== 所有文章基本信息 ===")
-    articles = ai_tool.get_all_articles_basic()
-    for article in articles:
-        print(f"ID: {article['id']}, 标题: {article['title']}, URL: {article['url']}, 发布时间: {article['publish_time']}")
-    
-    # 2. 清空数据库（谨慎使用）
-    # ai_tool.clear_database()
-    
-    # 3. 假设您有一个生成向量的函数
-    # def generate_embedding(text):
-    #     # 这里应该是您生成1024维向量的函数
-    #     return [0.0] * 1024  # 示例返回
-    
-    # # 为所有文章添加向量
-    # articles = ai_tool.get_all_articles_basic()
-    # for article in articles:
-    #     # 获取文章完整内容
-    #     full_article = ai_tool.database.get_article_by_id(article['id'])
-    #     embedding = generate_embedding(full_article['title'] + full_article['content'])
-    #     ai_tool.add_embedding_to_article(article['id'], embedding)
-    
-    # 4. 使用向量聚类
-    # events = ai_tool.cluster_articles_by_vectors()
-    # print(f"基于向量聚类生成 {len(events)} 个事件")
