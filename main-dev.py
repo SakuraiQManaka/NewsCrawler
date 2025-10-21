@@ -29,22 +29,17 @@ from bs4 import BeautifulSoup
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 import hashlib
 from openai import OpenAI
 from typing import List, Dict, Any
-import sqlite3
+import peewee
 import os
 import numpy as np
 from sklearn.cluster import DBSCAN
 import pickle
 import newscrawler as nc
-
-# 配置（请替换为你的API密钥）
-API_KEY = "sk-83669bdbb51f40b49a18e3f8fb5231d8"
-BASE_URL = "https://api.deepseek.com"
-# 或者使用其他AI服务，如Azure OpenAI、文心一言等
 
 #默认新闻网站列表
 sites = [
@@ -89,6 +84,35 @@ def gtembd(text):
         input = text,
         dimensions = 1024)
     return completion.data[0].embedding
+
+# Peewee 数据库定义
+db = peewee.SqliteDatabase('news.db')
+
+class BaseModel(peewee.Model):
+    class Meta:
+        database = db
+
+class Article(BaseModel):
+    title = peewee.TextField()
+    content = peewee.TextField(null=True)
+    source = peewee.TextField()
+    publish_time = peewee.TextField(null=True)
+    url = peewee.TextField(unique=True)
+    keywords = peewee.TextField(null=True)  # 存储为JSON字符串
+    event_id = peewee.TextField(null=True)
+    embedding = peewee.BlobField(null=True)  # 存储1024维向量
+    created_at = peewee.DateTimeField(constraints=[peewee.SQL('DEFAULT CURRENT_TIMESTAMP')])
+
+class Event(BaseModel):
+    event_id = peewee.TextField(primary_key=True)
+    one_sentence = peewee.TextField(null=True)
+    summary = peewee.TextField(null=True)
+    weight = peewee.FloatField(null=True)
+    article_count = peewee.IntegerField(null=True)
+    embedding = peewee.BlobField(null=True)  # 存储事件平均向量
+    last_updated = peewee.DateTimeField(constraints=[peewee.SQL('DEFAULT CURRENT_TIMESTAMP')])
+    # 新增时间标签字段
+    time_label = peewee.TextField(null=True)  # 存储第一篇相关文章的发布时间
 
 class NewsProcessor:
     """新闻处理器"""
@@ -139,12 +163,16 @@ class NewsProcessor:
         """为同一事件的多个文章生成总结"""
         if not articles:
             return "", ""
-        
-        combined_content = "\n\n".join([
-            f"来源: {article['source']}\n标题: {article['title']}\n内容: {article['content'][:500]}"
-            for article in articles
-        ])
-        
+        if len(articles)<=10:
+            combined_content = "\n\n".join([
+                f"来源: {article['source']}\n标题: {article['title']}\n内容: {article['content']}"
+                for article in articles
+            ])
+        elif len(articles)>10:
+            combined_content = "\n\n".join([
+                f"来源: {article['source']}\n标题: {article['title']}\n内容: {article['content'][:800]}"
+                for article in articles
+            ])
         try:
             # 生成一句话新闻
             one_sentence_prompt = f"""
@@ -182,173 +210,207 @@ class NewsProcessor:
             fallback_summary = f"该事件被{len(articles)}个来源报道，主要内容涉及{articles[0]['title']}"
             return fallback_sentence, fallback_summary
 
+    def analyze_recent_events(self, events_data):
+        """分析七日内所有事件的综合趋势"""
+        if not events_data:
+            return "暂无近期事件可供分析"
+        
+        try:
+            # 构建事件分析内容
+            events_content = ""
+            for i, (event_id, weight, info) in enumerate(events_data, 1):
+                events_content += f"\n{i}. 事件权重: {weight:.2f}\n"
+                events_content += f"   一句话新闻: {info['one_sentence']}\n"
+                events_content += f"   详细总结: {info['summary']}\n"
+                events_content += f"   相关文章数: {info['article_count']}\n"
+                events_content += f"   时间标签: {info['time_label']}\n"
+            
+            prompt = f"""
+            请分析以下七日内发生的新闻事件，总结整体趋势和热点话题：
+            
+            {events_content}
+            
+            请从以下几个方面进行分析：
+            1. 整体趋势和热点话题
+            2. 各事件的关联性和可能的发展方向
+            3. 对社会、经济或政治的可能影响
+            4. 建议关注的重点领域
+            
+            请用清晰的结构输出分析结果，使用中文回答。
+            """
+            content = "你是一个专业的新闻分析师，擅长从多个事件中识别趋势和模式。"
+            
+            response = rqds(prompt, content, 0.5)
+            analysis = response.choices[0].message.content.strip()
+            
+            return analysis
+            
+        except Exception as e:
+            print(f"事件分析失败: {e}")
+            return "事件分析失败，请检查网络连接或API配置"
+
 class NewsDatabase:
     """新闻数据库"""
     
     def __init__(self, db_path='news.db'):
         self.db_path = db_path
+        # 更新数据库路径
+        db.init(self.db_path)
         self.init_database()
     
     def init_database(self):
         """初始化数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # 创建文章表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS articles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                content TEXT,
-                source TEXT,
-                publish_time TEXT,
-                url TEXT UNIQUE,
-                keywords TEXT,
-                event_id TEXT,
-                embedding BLOB,  -- 存储1024维向量
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # 创建事件表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS events (
-                event_id TEXT PRIMARY KEY,
-                one_sentence TEXT,
-                summary TEXT,
-                weight REAL,
-                article_count INTEGER,
-                embedding BLOB,  -- 存储事件平均向量
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
+        db.connect()
+        db.create_tables([Article, Event], safe=True)
+        # 确保索引存在
+        try:
+            # 对于SQLite，使用原始SQL创建索引
+            db.execute_sql('CREATE INDEX IF NOT EXISTS idx_article_publish_time ON article(publish_time);')
+        except Exception as e:
+            print(f"创建索引时出错: {e}")
+        db.close()
     
     def gettodayurl(self):
+        """获取今天发布的所有文章的URL"""
+        today = datetime.now().strftime("%Y/%m/%d")
         todayurls = []
-        '''待完善'''
-        return todayurls
+
+        try:
+            # 使用数据库索引，只查询今天的数据
+            articles = Article.select().where(Article.publish_time == today)
+            
+            for article in articles:
+                todayurls.append(article.url)
+            
+            print(f"找到今天发布的文章URL数量: {len(todayurls)}")
+            return todayurls
+            
+        except Exception as e:
+            print(f"获取今天URL失败: {e}")
+            return []
 
     def save_article(self, article):
         """保存文章到数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
         try:
             # 处理embedding字段
             embedding_blob = None
             if 'embedding' in article:
                 embedding_blob = pickle.dumps(article['embedding'])
             
-            cursor.execute('''
-                INSERT OR REPLACE INTO articles 
-                (title, content, source, publish_time, url, keywords, event_id, embedding)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                article['title'],
-                article['content'],
-                article['source'],
-                article['publish_time'],
-                article['url'],
-                json.dumps(article.get('keywords', []), ensure_ascii=False),
-                article.get('event_id'),
-                embedding_blob
-            ))
+            # 处理keywords字段
+            keywords_str = None
+            if 'keywords' in article:
+                keywords_str = json.dumps(article['keywords'], ensure_ascii=False)
             
-            conn.commit()
+            # 使用Peewee的insert或replace操作
+            Article.replace(
+                title=article['title'],
+                content=article['content'],
+                source=article['source'],
+                publish_time=article['publish_time'],
+                url=article['url'],
+                keywords=keywords_str,
+                event_id=article.get('event_id'),
+                embedding=embedding_blob
+            ).execute()
+            
         except Exception as e:
-            print(e)
             print(f"保存文章失败: {e}")
-        finally:
-            conn.close()
     
-    def save_event(self, event_id, one_sentence, summary, weight, article_count, embedding=None):
+    def save_event(self, event_id, one_sentence, summary, weight, article_count, embedding=None, time_label=None):
         """保存事件到数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
         embedding_blob = None
         if embedding is not None:
             embedding_blob = pickle.dumps(embedding)
         
         try:
-            cursor.execute(''' 
-                INSERT OR REPLACE INTO events 
-                (event_id, one_sentence, summary, weight, article_count, embedding)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (event_id, one_sentence, summary, weight, article_count, embedding_blob))
-
-            conn.commit()
-            print(f"事件 {event_id} 成功保存到数据库")  # 调试信息
+            Event.replace(
+                event_id=event_id,
+                one_sentence=one_sentence,
+                summary=summary,
+                weight=weight,
+                article_count=article_count,
+                embedding=embedding_blob,
+                time_label=time_label
+            ).execute()
+            print(f"事件 {event_id} 成功保存到数据库")
         except Exception as e:
             print(f"保存事件失败: {e}")
-        finally:
-            conn.close()
 
+    def get_recent_events(self, days=7):
+        """获取最近指定天数内的事件"""
+        try:
+            # 计算起始日期
+            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
+            
+            # 查询时间标签在指定日期之后的事件
+            events = Event.select().where(Event.time_label >= start_date)
+            
+            result = []
+            for event in events:
+                result.append({
+                    'event_id': event.event_id,
+                    'one_sentence': event.one_sentence,
+                    'summary': event.summary,
+                    'weight': event.weight,
+                    'article_count': event.article_count,
+                    'time_label': event.time_label
+                })
+            
+            print(f"找到最近{days}天内的事件数量: {len(result)}")
+            return result
+            
+        except Exception as e:
+            print(f"获取近期事件失败: {e}")
+            return []
     
     def get_all_articles_basic(self):
         """获取所有文章的基本信息"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT id, title, url, publish_time FROM articles')
-        articles = cursor.fetchall()
-        
-        conn.close()
+        articles = Article.select(Article.id, Article.title, Article.url, Article.publish_time)
         
         # 转换为字典列表
         result = []
         for article in articles:
             result.append({
-                'id': article[0],
-                'title': article[1],
-                'url': article[2],
-                'publish_time': article[3]
+                'id': article.id,
+                'title': article.title,
+                'url': article.url,
+                'publish_time': article.publish_time
             })
         
         return result
     
     def clear_database(self):
         """清空数据库中的所有数据"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
         try:
-            cursor.execute('DELETE FROM articles')
-            cursor.execute('DELETE FROM events')
-            conn.commit()
+            Article.delete().execute()
+            Event.delete().execute()
             print("数据库已清空")
         except Exception as e:
             print(f"清空数据库失败: {e}")
-        finally:
-            conn.close()
     
     def get_articles_with_embeddings(self):
         """获取所有带有嵌入向量的文章"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT id, title, content, source, publish_time, url, keywords, embedding FROM articles WHERE embedding IS NOT NULL')
-        articles = cursor.fetchall()
-        
-        conn.close()
+        articles = Article.select().where(Article.embedding.is_null(False))
         
         result = []
         for article in articles:
             embedding = None
-            if article[7]:  # embedding字段
-                embedding = pickle.loads(article[7])
+            if article.embedding:
+                embedding = pickle.loads(article.embedding)
+            
+            keywords = []
+            if article.keywords:
+                keywords = json.loads(article.keywords)
             
             result.append({
-                'id': article[0],
-                'title': article[1],
-                'content': article[2],
-                'source': article[3],
-                'publish_time': article[4],
-                'url': article[5],
-                'keywords': json.loads(article[6]) if article[6] else [],
+                'id': article.id,
+                'title': article.title,
+                'content': article.content,
+                'source': article.source,
+                'publish_time': article.publish_time,
+                'url': article.url,
+                'keywords': keywords,
                 'embedding': embedding
             })
         
@@ -356,15 +418,9 @@ class NewsDatabase:
     
     def update_article_embedding(self, article_id, embedding):
         """更新文章的嵌入向量"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
         embedding_blob = pickle.dumps(embedding)
         
-        cursor.execute('UPDATE articles SET embedding = ? WHERE id = ?', (embedding_blob, article_id))
-        
-        conn.commit()
-        conn.close()
+        Article.update(embedding=embedding_blob).where(Article.id == article_id).execute()
 
 class VectorEventTracker:
     """基于向量的事件追踪器"""
@@ -430,13 +486,20 @@ class VectorEventTracker:
             # 更新质心
             embeddings = [a['embedding'] for a in self.events[event_id]['articles']]
             self.events[event_id]['centroid'] = self.calculate_event_centroid(embeddings)
+            
+            # 更新事件时间标签（取最早的文章时间）
+            if 'time_label' not in self.events[event_id] or \
+               (article['publish_time'] and article['publish_time'] < self.events[event_id]['time_label']):
+                self.events[event_id]['time_label'] = article['publish_time']
+                
             print(f"文章 {article['title']} 被添加到事件 {event_id}")  # 调试信息
         else:
             # 创建新事件
             event_id = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
             self.events[event_id] = {
                 'articles': [article],
-                'centroid': article['embedding']
+                'centroid': article['embedding'],
+                'time_label': article['publish_time']  # 设置时间标签为第一篇文章的时间
             }
             print(f"文章 {article['title']} 创建了新事件 {event_id}")  # 调试信息
         
@@ -466,14 +529,22 @@ class VectorEventTracker:
             
             events[event_id].append(articles_with_embeddings[i])
         
-        # 计算每个事件的质心
+        # 计算每个事件的质心和时间标签
         for event_id, articles in events.items():
             embeddings = [article['embedding'] for article in articles]
             centroid = self.calculate_event_centroid(embeddings)
             
+            # 计算时间标签（取最早的文章时间）
+            time_label = None
+            for article in articles:
+                if article['publish_time']:
+                    if time_label is None or article['publish_time'] < time_label:
+                        time_label = article['publish_time']
+            
             self.events[event_id] = {
                 'articles': articles,
-                'centroid': centroid
+                'centroid': centroid,
+                'time_label': time_label
             }
         
         return self.events
@@ -555,7 +626,8 @@ class NewsAITool:
             self.database.save_event(
                 event_id, one_sentence, summary, 
                 len(event_data['articles']), len(event_data['articles']),
-                event_data['centroid']
+                event_data['centroid'],
+                event_data.get('time_label')  # 保存时间标签
             )
 
             # 更新文章中事件ID
@@ -569,6 +641,7 @@ class NewsAITool:
         """爬取所有新闻源的文章"""
 
         all_articles = []
+        todayurls = self.database.gettodayurl()
 
         for site in self.sites:
             _ord = 0
@@ -584,7 +657,6 @@ class NewsAITool:
                 'http://www.news.cn/politics/20251020/4893586fb647414d8769f2fdb73352e8/c.html',
             ]
             '''
-            todayurls = self.database.gettodayurl()
             urls = set(urls) - set(todayurls)
             _tot = len(urls)
             if not urls:
@@ -625,32 +697,37 @@ class NewsAITool:
         # 计算事件权重
         weights = self.vector_event_tracker.calculate_event_weights()
         print(f"事件权重: {weights}")  # 调试信息
+        _tot = len(self.vector_event_tracker.events.items())
+        _ord = 0
 
         # 为每个事件生成总结
         for event_id, event_data in self.vector_event_tracker.events.items():
+            _ord += 1
             articles = event_data['articles']
             one_sentence, summary = self.processor.generate_summary(articles)
             
             # 确保生成了总结
             if one_sentence and summary:
-                print(f"事件 {event_id} 总结生成成功：{one_sentence}, {summary}")
+                print(f"(进度{_ord}/{_tot})事件 {event_id} 总结生成成功：{one_sentence}, {summary}")
             else:
-                print(f"事件 {event_id} 总结生成失败")
+                print(f"(进度{_ord}/{_tot})事件 {event_id} 总结生成失败")
 
             self.vector_event_tracker.event_summaries[event_id] = {
                 'one_sentence': one_sentence,
                 'summary': summary,
                 'weight': weights.get(event_id, 0),
-                'article_count': len(articles)
+                'article_count': len(articles),
+                'time_label': event_data.get('time_label')  # 保存时间标签
             }
 
             # 保存到数据库
             self.database.save_event(
                 event_id, one_sentence, summary, 
-                weights.get(event_id, 0), len(articles)
+                weights.get(event_id, 0), len(articles),
+                embedding=None,  # 如果需要保存embedding，可以添加
+                time_label=event_data.get('time_label')  # 保存时间标签
             )
 
-    
     def get_important_events(self, top_n=5):
         """获取最重要的事件"""
         events_with_weights = [
@@ -668,6 +745,36 @@ class NewsAITool:
 
         return sorted_events[:top_n]
 
+    def analyze_recent_events(self, days=7):
+        """分析最近指定天数内的事件"""
+        # 从数据库获取近期事件
+        recent_events = self.database.get_recent_events(days)
+        
+        if not recent_events:
+            print(f"最近{days}天内没有事件可供分析")
+            return None
+        
+        # 转换为与get_important_events相同的格式
+        events_data = []
+        for event in recent_events:
+            events_data.append((
+                event['event_id'],
+                event['weight'] or 0,
+                {
+                    'one_sentence': event['one_sentence'],
+                    'summary': event['summary'],
+                    'article_count': event['article_count'],
+                    'time_label': event['time_label']
+                }
+            ))
+        
+        # 按权重排序
+        sorted_events = sorted(events_data, key=lambda x: x[1], reverse=True)
+        
+        # 使用AI分析近期事件
+        analysis = self.processor.analyze_recent_events(sorted_events)
+        
+        return analysis
     
     def run(self):
         """运行完整的新闻处理流程"""
@@ -675,7 +782,6 @@ class NewsAITool:
         articles = self.crawl_all_news()
         print(f"成功爬取 {len(articles)} 篇文章")
         
-
         print("处理事件和生成总结...")
         self.process_events()
         
@@ -689,6 +795,12 @@ class NewsAITool:
             print(f"   一句话新闻: {info['one_sentence']}")
             print(f"   详细总结: {info['summary']}")
             print(f"   相关文章: {info['article_count']} 篇")
+            print(f"   时间标签: {info.get('time_label', '未知')}")
+        
+        # 分析近期事件
+        print("\n=== 七日事件综合分析 ===")
+        recent_analysis = self.analyze_recent_events(7)
+        print(recent_analysis)
         
         return True
 
@@ -697,8 +809,7 @@ if __name__ == "__main__":
     # 初始化工具（请替换为你的API密钥）
     ai_tool = NewsAITool(sites, catalogue)
     
-    ai_tool.database.clear_database()
+    # ai_tool.database.clear_database()
 
     # 运行完整流程
     ai_tool.run()
-    
